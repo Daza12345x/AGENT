@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 
-// Fix leaflet default marker icon
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -15,7 +14,6 @@ const pulsingIcon = L.divIcon({
   html: `<div style="width:18px;height:18px;border-radius:50%;background:#7b7bff;border:3px solid #fff;box-shadow:0 0 0 6px rgba(123,123,255,0.3);animation:mapPulse 1.5s infinite;"></div>`,
   iconSize: [18, 18], iconAnchor: [9, 9],
 });
-
 const alertIcon = L.divIcon({
   className: "",
   html: `<div style="width:22px;height:22px;border-radius:50%;background:#ff2d55;border:3px solid #fff;box-shadow:0 0 0 8px rgba(255,45,85,0.4);animation:mapPulse 0.8s infinite;"></div>`,
@@ -34,10 +32,15 @@ const DEFAULT_CONTACTS = [
   { name: "Papá",    phone: "+591 6XX-XXXX", active: true  },
   { name: "Amigo/a", phone: "+591 7XX-XXXX", active: false },
 ];
-const DRIVER = { name: "Carlos Mendoza", plate: "3456-BOL", rating: 4.2, trips: 1247, verified: true };
 const RC = { alto:"#ff2d55", medio:"#ff9500", bajo:"#30d158" };
 
+// ── Apunta a tu backend local ──m
+const BACKEND = "https://chrysocarpous-langston-schizogonous.ngrok-free.dev";
+
 export default function AgenteSeguridad() {
+  const [driver, setDriver]                 = useState(null);
+  const [driverLoading, setDriverLoading]   = useState(true);
+  const [driverError, setDriverError]       = useState(null);
   const [screen, setScreen]                 = useState("main");
   const [isActive, setIsActive]             = useState(false);
   const [transcript, setTranscript]         = useState([]);
@@ -51,7 +54,6 @@ export default function AgenteSeguridad() {
   const [snsLog, setSnsLog]                 = useState([]);
   const [contacts, setContacts]             = useState(DEFAULT_CONTACTS);
   const [myName, setMyName]                 = useState("Pasajero");
-  const [snsEndpoint, setSnsEndpoint]       = useState("");
   const [editContacts, setEditContacts]     = useState(null);
   const [userPos, setUserPos]               = useState(null);
   const [accuracy, setAccuracy]             = useState(null);
@@ -68,24 +70,37 @@ export default function AgenteSeguridad() {
   const alertedRef     = useRef(false);
   const watchIdRef     = useRef(null);
 
-  // GPS
+  // ── Cargar taxista desde URL ?id= ────────────────────────
   useEffect(() => {
-    if (!navigator.geolocation) { setGpsError("Geolocalización no disponible"); return; }
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    if (!id) {
+      setDriverError("No se encontró ID de taxista.\nEscanea el NFC del taxi o abre: /?id=TX001");
+      setDriverLoading(false);
+      return;
+    }
+    fetch(`${BACKEND}/taxista/${id}`)
+      .then(r => { if (!r.ok) throw new Error("Taxista no encontrado"); return r.json(); })
+      .then(data => { setDriver(data); setDriverLoading(false); })
+      .catch(err => { setDriverError(`No se pudo cargar "${id}".\n${err.message}`); setDriverLoading(false); });
+  }, []);
+
+  // ── GPS ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (!navigator.geolocation) { setGpsError("Sin geolocalización"); return; }
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         const coords = [pos.coords.latitude, pos.coords.longitude];
-        setUserPos(coords);
-        setAccuracy(Math.round(pos.coords.accuracy));
-        setGpsError(null);
+        setUserPos(coords); setAccuracy(Math.round(pos.coords.accuracy)); setGpsError(null);
         setLocationHistory(h => [...h.slice(-49), coords]);
       },
-      (err) => setGpsError("Sin señal GPS"),
+      () => setGpsError("Sin señal GPS"),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
     );
     return () => navigator.geolocation.clearWatch(watchIdRef.current);
   }, []);
 
-  // Timer
+  // ── Timer ─────────────────────────────────────────────────
   useEffect(() => {
     if (isActive) timerRef.current = setInterval(() => setTripTime(t => t+1), 1000);
     else clearInterval(timerRef.current);
@@ -94,6 +109,7 @@ export default function AgenteSeguridad() {
 
   const fmt = s => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
 
+  // ── Mic ───────────────────────────────────────────────────
   const startMicLevel = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -119,12 +135,14 @@ export default function AgenteSeguridad() {
     setMicLevel(0);
   };
 
+  // ── Keywords ──────────────────────────────────────────────
   const checkKeywords = useCallback(text => {
     const l = text.toLowerCase();
     for (const kw of DEFAULT_KEYWORDS) if (l.includes(kw)) return kw;
     return null;
   }, []);
 
+  // ── Claude AI ─────────────────────────────────────────────
   const analyzeWithAI = async text => {
     setIsAnalyzing(true);
     try {
@@ -139,38 +157,68 @@ export default function AgenteSeguridad() {
         })
       });
       const data = await res.json();
-      const raw  = data.content?.[0]?.text || "{}";
-      const obj  = JSON.parse(raw.replace(/```json|```/g,"").trim());
+      const obj  = JSON.parse((data.content?.[0]?.text || "{}").replace(/```json|```/g,"").trim());
       setAiAnalysis(obj);
       if (obj.accion === "alerta" && !alertedRef.current) triggerAlert("IA detectó riesgo: " + obj.razon, text);
-    } catch { setAiAnalysis({ riesgo:"bajo", razon:"Sin conexión con IA", accion:"normal" }); }
+    } catch { setAiAnalysis({ riesgo:"bajo", razon:"Sin conexión IA", accion:"normal" }); }
     setIsAnalyzing(false);
   };
 
-  const sendAlerts = async (reason, location) => {
-    const active = contacts.filter(c => c.active);
-    const message = `🚨 ALERTA DE SEGURIDAD\n👤 ${myName} necesita ayuda\n📍 ${location}\n🚗 Taxi ${DRIVER.plate} | ${DRIVER.name}\n⏰ ${new Date().toLocaleTimeString()}\n📋 ${reason}\n[Agente Seguridad]`;
-    for (const c of active) {
-      if (snsEndpoint) {
-        try {
-          const r = await fetch(snsEndpoint, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ phone: c.phone, message }) });
-          setSnsLog(p => [...p, { contact:c.name, ok:r.ok, time:new Date().toLocaleTimeString(), text: r.ok?`SMS enviado a ${c.name}`:`Error con ${c.name}` }]);
-        } catch { setSnsLog(p => [...p, { contact:c.name, ok:false, time:new Date().toLocaleTimeString(), text:`Sin conexión — ${c.name}` }]); }
-      } else {
-        setSnsLog(p => [...p, { contact:c.name, ok:true, sim:true, time:new Date().toLocaleTimeString(), text:`[SIMULADO] SMS a ${c.name} (${c.phone})`, message }]);
+  // ── Enviar alerta → backend → SNS ─────────────────────────
+  const sendAlerts = async (motivo, ubicacion) => {
+    try {
+      const res = await fetch(`${BACKEND}/alerta`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          motivo,
+          ubicacion,
+          taxistaId: driver?.id || "desconocido",
+          pasajero:  myName,
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        // Mostrar en el log que el SMS fue enviado
+        contacts.filter(c => c.active).forEach(c => {
+          setSnsLog(p => [...p, {
+            contact: c.name,
+            ok: true,
+            time: new Date().toLocaleTimeString(),
+            text: `✓ SMS enviado a ${c.name} vía SNS`
+          }]);
+        });
+        // También log general
+        setSnsLog(p => [...p, {
+          contact: "SNS",
+          ok: true,
+          time: new Date().toLocaleTimeString(),
+          text: `📡 Alerta publicada en SNS`
+        }]);
       }
+    } catch (err) {
+      setSnsLog(p => [...p, {
+        contact: "ERROR",
+        ok: false,
+        time: new Date().toLocaleTimeString(),
+        text: `✗ Error al enviar: ${err.message}`
+      }]);
     }
   };
 
+  // ── Trigger alerta ────────────────────────────────────────
   const triggerAlert = (reason, text) => {
     if (alertedRef.current) return;
     alertedRef.current = true;
     setAlertTriggered(true);
-    const location = userPos ? `GPS: ${userPos[0].toFixed(5)}, ${userPos[1].toFixed(5)}` : "Cochabamba, Bolivia";
-    setAlertDetails({ reason, text, time: new Date().toLocaleTimeString(), location });
-    sendAlerts(reason, location);
+    const ubicacion = userPos
+      ? `GPS: ${userPos[0].toFixed(5)}, ${userPos[1].toFixed(5)}`
+      : "Ubicación no disponible";
+    setAlertDetails({ reason, text, time: new Date().toLocaleTimeString(), location: ubicacion });
+    sendAlerts(reason, ubicacion);  // ← llama al backend
   };
 
+  // ── Speech Recognition ────────────────────────────────────
   const startListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { alert("Usa Chrome para reconocimiento de voz."); return; }
@@ -183,7 +231,7 @@ export default function AgenteSeguridad() {
       transcriptRef.current = updated;
       setTranscript([...updated]);
       const kw = checkKeywords(latest);
-      if (kw && !alertedRef.current) { setDetectedKw(kw); triggerAlert(`Keyword: "${kw}"`, latest); }
+      if (kw && !alertedRef.current) { setDetectedKw(kw); triggerAlert(`Keyword detectada: "${kw}"`, latest); }
       if (updated.length % 3 === 0) analyzeWithAI(updated.slice(-3).map(t=>t.text).join(". "));
     };
     rec.onerror = () => {};
@@ -206,7 +254,29 @@ export default function AgenteSeguridad() {
     stopMicLevel();
   };
 
-  /* ══════ CONFIG SCREEN ══════ */
+  // ══════════ LOADING ══════════
+  if (driverLoading) return (
+    <div style={{ width:"100vw", height:"100vh", background:"#0a0a0f", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#e0e0e0" }}>
+      <div style={{ fontSize:36, marginBottom:20 }}>🔍</div>
+      <div style={{ fontSize:12, letterSpacing:3, color:"#7b7bff", marginBottom:16 }}>CARGANDO DATOS DEL TAXISTA</div>
+      <div style={{ width:200, height:2, background:"#1a1a2e", borderRadius:2, overflow:"hidden" }}>
+        <div style={{ height:"100%", background:"linear-gradient(90deg,#7b7bff,#3a3a9e)", animation:"loadBar 1.2s infinite", borderRadius:2 }} />
+      </div>
+      <style>{`@keyframes loadBar{0%{width:0%;margin-left:0}50%{width:60%}100%{width:0%;margin-left:100%}}`}</style>
+    </div>
+  );
+
+  // ══════════ ERROR ══════════
+  if (driverError) return (
+    <div style={{ width:"100vw", height:"100vh", background:"#0a0a0f", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", fontFamily:"'Courier New',monospace", color:"#e0e0e0", padding:40, textAlign:"center" }}>
+      <div style={{ fontSize:48, marginBottom:20 }}>🏷️</div>
+      <div style={{ fontSize:13, letterSpacing:2, color:"#ff9500", marginBottom:16 }}>TAXISTA NO ENCONTRADO</div>
+      <div style={{ fontSize:12, color:"#555", lineHeight:2, whiteSpace:"pre-line", marginBottom:30 }}>{driverError}</div>
+      <div style={{ fontSize:11, color:"#333" }}>Prueba: <span style={{ color:"#7b7bff" }}>/?id=TX001</span> hasta <span style={{ color:"#7b7bff" }}>/?id=TX010</span></div>
+    </div>
+  );
+
+  // ══════════ CONFIG ══════════
   if (screen === "config") {
     const ec = editContacts || contacts;
     return (
@@ -215,13 +285,16 @@ export default function AgenteSeguridad() {
           <button onClick={() => { setScreen("main"); setEditContacts(null); }} style={{ background:"none", border:"1px solid #2a2a3e", borderRadius:8, color:"#7b7bff", fontSize:13, padding:"6px 14px", cursor:"pointer", fontFamily:"'Courier New',monospace" }}>← Volver</button>
           <span style={{ fontSize:12, letterSpacing:3, color:"#888" }}>CONFIGURACIÓN</span>
         </div>
-        <div style={{ flex:1, display:"grid", gridTemplateColumns:"1fr 1fr", gap:24, padding:32, maxWidth:900, width:"100%" }}>
+        <div style={{ flex:1, display:"grid", gridTemplateColumns:"1fr 1fr", gap:24, padding:32, maxWidth:900 }}>
           <div>
             <SL>TU NOMBRE</SL>
             <CFInput value={myName} onChange={e=>setMyName(e.target.value)} placeholder="Tu nombre" />
-            <SL style={{ marginTop:24 }}>ENDPOINT AWS SNS</SL>
-            <CFInput value={snsEndpoint} onChange={e=>setSnsEndpoint(e.target.value)} placeholder="https://xxx.execute-api.amazonaws.com/prod/alert" small />
-            <div style={{ fontSize:11, color:"#555", marginTop:6, lineHeight:1.7 }}>Sin endpoint los SMS se simulan.</div>
+            <div style={{ marginTop:20, padding:"14px 16px", background:"rgba(48,209,88,0.05)", border:"1px solid #30d15830", borderRadius:8 }}>
+              <div style={{ fontSize:11, color:"#30d158", marginBottom:6 }}>✓ SNS CONFIGURADO</div>
+              <div style={{ fontSize:11, color:"#666", lineHeight:1.7 }}>
+                Los SMS se envían automáticamente vía AWS SNS (LocalStack) al detectar una keyword o activar SOS.
+              </div>
+            </div>
           </div>
           <div>
             <SL>CONTACTOS DE EMERGENCIA</SL>
@@ -250,7 +323,7 @@ export default function AgenteSeguridad() {
     );
   }
 
-  /* ══════ MAIN DASHBOARD ══════ */
+  // ══════════ MAIN DASHBOARD ══════════
   const defaultCenter = userPos || [-17.3895, -66.1568];
 
   return (
@@ -266,9 +339,10 @@ export default function AgenteSeguridad() {
         <div style={{ display:"flex", alignItems:"center", gap:14 }}>
           <div style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 12px", borderRadius:20, background:userPos?"rgba(48,209,88,0.08)":"rgba(255,149,0,0.08)", border:`1px solid ${userPos?"#30d15840":"#ff950040"}` }}>
             <div style={{ width:6, height:6, borderRadius:"50%", background:userPos?"#30d158":"#ff9500", animation:userPos?"pulse 2s infinite":"none" }} />
-            <span style={{ fontSize:9, color:userPos?"#30d158":"#ff9500" }}>
-              {userPos ? `GPS ±${accuracy}m` : (gpsError || "Buscando GPS...")}
-            </span>
+            <span style={{ fontSize:9, color:userPos?"#30d158":"#ff9500" }}>{userPos?`GPS ±${accuracy}m`:(gpsError||"Buscando GPS...")}</span>
+          </div>
+          <div style={{ padding:"4px 12px", borderRadius:20, background:"rgba(123,123,255,0.08)", border:"1px solid #3a3a9e", fontSize:9, color:"#7b7bff" }}>
+            🏷️ {driver?.id}
           </div>
           {alertTriggered && <span style={{ fontSize:11, color:"#ff2d55", animation:"blink 1s infinite" }}>🚨 ALERTA ACTIVA</span>}
           <button onClick={()=>{ setEditContacts(null); setScreen("config"); }} style={{ background:"none", border:"1px solid #2a2a3e", borderRadius:8, color:"#666", fontSize:10, padding:"5px 12px", cursor:"pointer", fontFamily:"'Courier New',monospace" }}>⚙ CONFIG</button>
@@ -285,7 +359,7 @@ export default function AgenteSeguridad() {
           <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
             {snsLog.map((l,i) => (
               <div key={i} style={{ background:l.ok?"rgba(48,209,88,0.1)":"rgba(255,45,85,0.1)", border:`1px solid ${l.ok?"#30d158":"#ff2d55"}`, borderRadius:20, padding:"3px 10px", fontSize:10, color:l.ok?"#30d158":"#ff2d55" }}>
-                {l.ok?`✓ ${l.contact}`:`✗ ${l.contact}`}{l.sim?" (sim)":""}
+                {l.text}
               </div>
             ))}
           </div>
@@ -293,33 +367,50 @@ export default function AgenteSeguridad() {
       )}
 
       {/* GRID 4 columnas */}
-      <div style={{ flex:1, display:"grid", gridTemplateColumns:"250px 1fr 360px 240px", gap:0, overflow:"hidden", minHeight:0 }}>
+      <div style={{ flex:1, display:"grid", gridTemplateColumns:"260px 1fr 360px 240px", gap:0, overflow:"hidden", minHeight:0 }}>
 
         {/* COL 1: Driver + Contacts */}
         <div style={{ borderRight:"1px solid #1a1a2e", display:"flex", flexDirection:"column", overflowY:"auto" }}>
           <div style={{ padding:16, borderBottom:"1px solid #1a1a2e" }}>
-            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:12 }}>CONDUCTOR</div>
-            <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
-              <div style={{ width:46, height:46, borderRadius:"50%", background:"linear-gradient(135deg,#1a1a4e,#2d2d8e)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, fontWeight:"bold", color:"#7b7bff", border:"2px solid #3a3a9e", flexShrink:0 }}>CM</div>
+            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:12 }}>CONDUCTOR — {driver?.id}</div>
+            <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
+              <div style={{ width:52, height:52, borderRadius:"50%", background:"linear-gradient(135deg,#1a1a4e,#2d2d8e)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, fontWeight:"bold", color:"#7b7bff", border:"2px solid #3a3a9e", flexShrink:0 }}>
+                {driver?.iniciales}
+              </div>
               <div>
-                <div style={{ fontSize:13, fontWeight:"bold" }}>{DRIVER.name}</div>
-                <div style={{ fontSize:10, color:"#888" }}>Placa: {DRIVER.plate}</div>
-                <div style={{ fontSize:10, color:"#888" }}>{DRIVER.trips} viajes</div>
+                <div style={{ fontSize:14, fontWeight:"bold" }}>{driver?.nombre}</div>
+                <div style={{ fontSize:10, color:"#888" }}>Placa: {driver?.placa}</div>
+                <div style={{ fontSize:10, color:"#888" }}>{driver?.viajes} viajes</div>
               </div>
             </div>
-            <div style={{ display:"flex", gap:8 }}>
+            <div style={{ display:"flex", gap:8, marginBottom:12 }}>
               <div style={{ flex:1, background:"rgba(255,214,10,0.08)", border:"1px solid #ffd60a30", borderRadius:8, padding:"8px", textAlign:"center" }}>
-                <div style={{ fontSize:15, color:"#ffd60a" }}>★ {DRIVER.rating}</div>
+                <div style={{ fontSize:16, color:"#ffd60a" }}>★ {driver?.rating}</div>
                 <div style={{ fontSize:9, color:"#666", marginTop:1 }}>Rating</div>
               </div>
-              <div style={{ flex:1, background:"rgba(48,209,88,0.08)", border:"1px solid #30d15830", borderRadius:8, padding:"8px", textAlign:"center" }}>
-                <div style={{ fontSize:13, color:"#30d158" }}>✓</div>
-                <div style={{ fontSize:9, color:"#666", marginTop:1 }}>Verificado</div>
+              <div style={{ flex:1, background:driver?.verificado?"rgba(48,209,88,0.08)":"rgba(255,45,85,0.08)", border:`1px solid ${driver?.verificado?"#30d15830":"#ff2d5530"}`, borderRadius:8, padding:"8px", textAlign:"center" }}>
+                <div style={{ fontSize:13, color:driver?.verificado?"#30d158":"#ff2d55" }}>{driver?.verificado?"✓":"✗"}</div>
+                <div style={{ fontSize:9, color:"#666", marginTop:1 }}>{driver?.verificado?"Verificado":"No verificado"}</div>
               </div>
             </div>
+            {[
+              ["🚗","Vehículo", driver?.vehiculo],
+              ["📋","Licencia", driver?.licencia],
+              ["🛡️","Antecedentes", driver?.antecedentes],
+              ["⏳","Antigüedad", driver?.antiguedad],
+              ["📞","Teléfono", driver?.telefono],
+            ].map(([icon,label,value]) => (
+              <div key={label} style={{ display:"flex", gap:8, padding:"7px 0", borderBottom:"1px solid #111" }}>
+                <span style={{ fontSize:11 }}>{icon}</span>
+                <div>
+                  <div style={{ fontSize:9, color:"#555" }}>{label}</div>
+                  <div style={{ fontSize:11, color:"#ccc" }}>{value}</div>
+                </div>
+              </div>
+            ))}
           </div>
           <div style={{ padding:16, flex:1 }}>
-            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:12 }}>CONTACTOS</div>
+            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:10 }}>MIS CONTACTOS</div>
             {contacts.map((c,i) => (
               <div key={i} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", background:"rgba(255,255,255,0.03)", borderRadius:8, marginBottom:6, border:"1px solid #1e1e2e", opacity:c.active?1:0.4 }}>
                 <div style={{ width:28, height:28, borderRadius:"50%", background:"rgba(123,123,255,0.15)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, border:"1px solid #3a3a9e", flexShrink:0 }}>👤</div>
@@ -377,7 +468,7 @@ export default function AgenteSeguridad() {
               : <>
                   <button onClick={handleStop} style={{ flex:1, padding:"11px", background:"rgba(255,45,85,0.08)", border:"1px solid #ff2d5540", borderRadius:12, color:"#ff2d55", fontSize:11, cursor:"pointer", fontFamily:"'Courier New',monospace" }}>■ TERMINAR</button>
                   {!alertTriggered && (
-                    <button onClick={()=>triggerAlert("SOS Manual activado","")} style={{ padding:"11px 22px", background:"rgba(255,45,85,0.2)", border:"2px solid #ff2d55", borderRadius:12, color:"#ff2d55", fontSize:13, cursor:"pointer", fontFamily:"'Courier New',monospace", fontWeight:"bold" }}>🚨 SOS</button>
+                    <button onClick={()=>triggerAlert("SOS Manual activado por el pasajero","")} style={{ padding:"11px 22px", background:"rgba(255,45,85,0.2)", border:"2px solid #ff2d55", borderRadius:12, color:"#ff2d55", fontSize:13, cursor:"pointer", fontFamily:"'Courier New',monospace", fontWeight:"bold" }}>🚨 SOS</button>
                   )}
                 </>
             }
@@ -392,7 +483,7 @@ export default function AgenteSeguridad() {
           </div>
           <div style={{ flex:1, position:"relative", minHeight:0 }}>
             {userPos ? (
-              <MapContainer center={defaultCenter} zoom={16} style={{ width:"100%", height:"100%" }} zoomControl={true}>
+              <MapContainer center={defaultCenter} zoom={16} style={{ width:"100%", height:"100%" }}>
                 <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution='&copy; OpenStreetMap' />
                 <MapUpdater center={userPos} />
                 {accuracy && (
@@ -403,7 +494,8 @@ export default function AgenteSeguridad() {
                   <Popup>
                     <div style={{ fontFamily:"sans-serif", fontSize:12 }}>
                       <strong>{myName}</strong><br/>
-                      🚗 {DRIVER.plate}<br/>
+                      🚗 {driver?.placa}<br/>
+                      👤 {driver?.nombre}<br/>
                       📍 ±{accuracy}m
                     </div>
                   </Popup>
@@ -412,14 +504,13 @@ export default function AgenteSeguridad() {
             ) : (
               <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", color:"#333" }}>
                 <div style={{ fontSize:30, marginBottom:10 }}>🗺️</div>
-                <div style={{ fontSize:11, color:"#444", textAlign:"center", padding:"0 20px" }}>{gpsError || "Obteniendo ubicación GPS..."}</div>
-                {gpsError && <div style={{ fontSize:9, color:"#555", marginTop:6, textAlign:"center", padding:"0 20px" }}>Permite el acceso a ubicación en tu navegador</div>}
+                <div style={{ fontSize:11, color:"#444", textAlign:"center", padding:"0 20px" }}>{gpsError||"Obteniendo ubicación GPS..."}</div>
               </div>
             )}
           </div>
           <div style={{ padding:"8px 16px", borderTop:"1px solid #1a1a2e", display:"flex", justifyContent:"space-between", flexShrink:0 }}>
-            <div style={{ fontSize:9, color:"#555" }}>{locationHistory.length > 0 ? `${locationHistory.length} pts registrados` : "Sin historial"}</div>
-            <div style={{ fontSize:9, color:userPos?"#30d158":"#ff9500" }}>{userPos?`● Activo ±${accuracy}m`:"○ Sin señal"}</div>
+            <div style={{ fontSize:9, color:"#555" }}>{locationHistory.length>0?`${locationHistory.length} pts`:"Sin historial"}</div>
+            <div style={{ fontSize:9, color:userPos?"#30d158":"#ff9500" }}>{userPos?`● ±${accuracy}m`:"○ Sin señal"}</div>
           </div>
         </div>
 
@@ -436,12 +527,10 @@ export default function AgenteSeguridad() {
               {isActive?(micLevel<5?"Silencio...":"● Escuchando"):"Inactivo"}
             </div>
             {detectedKw && (
-              <div style={{ marginTop:7, padding:"5px 8px", background:"rgba(255,45,85,0.08)", border:"1px solid #ff2d5530", borderRadius:8, fontSize:10, color:"#ff2d55", textAlign:"center" }}>
-                ⚡ "{detectedKw}"
-              </div>
+              <div style={{ marginTop:7, padding:"5px 8px", background:"rgba(255,45,85,0.08)", border:"1px solid #ff2d5530", borderRadius:8, fontSize:10, color:"#ff2d55", textAlign:"center" }}>⚡ "{detectedKw}"</div>
             )}
           </div>
-          <div style={{ padding:"12px 14px", borderBottom:"1px solid #1a1a2e", flexShrink:0 }}>
+          <div style={{ padding:"10px 14px", borderBottom:"1px solid #1a1a2e", flexShrink:0 }}>
             <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:8 }}>KEYWORDS</div>
             <div style={{ display:"flex", flexWrap:"wrap", gap:4 }}>
               {DEFAULT_KEYWORDS.map(kw => (
@@ -449,14 +538,13 @@ export default function AgenteSeguridad() {
               ))}
             </div>
           </div>
-          <div style={{ flex:1, padding:"12px 14px", overflowY:"auto" }}>
-            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:8 }}>SMS LOG</div>
+          <div style={{ flex:1, padding:"10px 14px", overflowY:"auto" }}>
+            <div style={{ fontSize:9, color:"#555", letterSpacing:3, marginBottom:8 }}>SNS LOG</div>
             {snsLog.length===0
               ? <div style={{ fontSize:10, color:"#222", textAlign:"center", paddingTop:14 }}>Sin actividad</div>
               : snsLog.map((l,i) => (
                   <div key={i} style={{ padding:"7px 9px", background:l.ok?"rgba(48,209,88,0.05)":"rgba(255,45,85,0.05)", border:`1px solid ${l.ok?"#30d15830":"#ff2d5530"}`, borderRadius:8, marginBottom:6 }}>
                     <div style={{ fontSize:10, color:l.ok?"#30d158":"#ff2d55" }}>{l.text}</div>
-                    {l.sim && <div style={{ fontSize:8, color:"#444", marginTop:2 }}>simulado</div>}
                     <div style={{ fontSize:8, color:"#333", marginTop:1 }}>{l.time}</div>
                   </div>
                 ))
@@ -467,7 +555,6 @@ export default function AgenteSeguridad() {
 
       <style>{`
         @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.4)}}
-        @keyframes flashIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
         @keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
         @keyframes mapPulse{0%,100%{box-shadow:0 0 0 4px rgba(123,123,255,0.3)}50%{box-shadow:0 0 0 12px rgba(123,123,255,0.05)}}
         *{box-sizing:border-box;margin:0;padding:0}
@@ -475,13 +562,11 @@ export default function AgenteSeguridad() {
         ::-webkit-scrollbar{width:4px}
         ::-webkit-scrollbar-thumb{background:#2a2a3e;border-radius:2px}
         input::placeholder{color:#333}
-        input:focus{outline:none;border-color:#3a3a9e !important}
         .leaflet-container{background:#0d0d1a !important}
         .leaflet-tile{filter:brightness(0.8) saturate(0.6) hue-rotate(200deg)}
         .leaflet-control-zoom a{background:#1a1a2e !important;color:#7b7bff !important;border-color:#2a2a3e !important}
         .leaflet-popup-content-wrapper{background:#1a1a2e;border:1px solid #2a2a3e;color:#e0e0e0;font-family:'Courier New',monospace}
         .leaflet-popup-tip{background:#1a1a2e}
-        .leaflet-attribution-flag{display:none}
       `}</style>
     </div>
   );
